@@ -4,17 +4,23 @@ Die Daten liegen nur in Home Assistant (/config/.storage/wunschliste, Teil jeder
 Sicherung). Bearbeitet wird über den Menüpunkt „Wunschliste“ in der Seitenleiste,
 der durch den Home-Assistant-Login geschützt ist.
 
-Für Familie und Freunde gibt es eine Nur-Lese-Seite ohne Login unter /geschenkliste.
+Für Familie und Freunde gibt es eine Seite ohne Login unter /geschenkliste.
 Sie bekommt nur die öffentlichen Felder: wer etwas schenkt, sieht dort niemand,
-nur dass es vergeben ist.
+nur dass es vergeben ist. Dort kann man einen freien Wunsch selbst mit seinem
+Namen als vergeben markieren. Wieder freigeben kann ihn nur, wer ihn markiert hat
+(Schlüssel im Browser) oder jemand mit HA-Login.
 """
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
+import time
 import logging
 import re
 import secrets
-from datetime import date
+from collections import deque
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -34,7 +40,7 @@ from homeassistant.helpers.storage import Store
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "wunschliste"
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 STORAGE_VERSION = 1
 PANEL_URL = "wunschliste"
 STATIC_URL = "/wunschliste_static/wunschliste-panel.js"
@@ -42,6 +48,12 @@ PANEL_FILE = Path(__file__).parent / "wunschliste-panel.js"
 PUBLIC_FILE = Path(__file__).parent / "public.html"
 PUBLIC_PAGE_URL = "/geschenkliste"
 PUBLIC_DATA_URL = "/api/wunschliste/liste"
+PUBLIC_RESERVE_URL = "/api/wunschliste/vergeben"
+PUBLIC_RELEASE_URL = "/api/wunschliste/freigeben"
+EVENT_RESERVED = f"{DOMAIN}_vergeben"
+EVENT_RELEASED = f"{DOMAIN}_freigegeben"
+RATE_LIMIT = 20  # Aktionen pro Adresse ...
+RATE_WINDOW = 600  # ... in 10 Minuten
 SIGNAL = f"{DOMAIN}_changed"
 REGISTERED = f"{DOMAIN}_registered"
 MAX_ITEMS = 500
@@ -51,6 +63,8 @@ THEMES = [
     "Unterwegs", "Gesundheit", "Zeit & Gutscheine", "Sonstiges",
 ]
 PUBLIC_FIELDS = ("id", "name", "note", "price", "theme", "shop", "url")
+# Interne Felder einer Selbst-Markierung über die öffentliche Seite.
+SELF_FIELDS = ("reservedKey", "reservedAt")
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "title": "Unsere Wunschliste",
@@ -62,11 +76,18 @@ DEFAULT_SETTINGS: dict[str, Any] = {
         "und über Zeit statt Zeug freuen wir uns genauso."
     ),
     "howto": (
-        "So geht’s: Such dir etwas aus, das noch frei ist, und sag uns kurz "
-        "Bescheid. Wir markieren es dann als vergeben, damit nichts doppelt kommt. "
+        "So geht’s: Such dir etwas aus, das noch frei ist, und tipp auf „Ich "
+        "schenke das“. Mit deinem Namen ist es dann für alle als vergeben "
+        "markiert, damit nichts doppelt kommt. Wer es schenkt, sehen nur wir. "
         "Die Links sind Vorschläge, kauft gern, wo ihr wollt."
     ),
 }
+# Hinweistext aus 1.0.0: wer ihn nie geändert hat, bekommt den neuen.
+OLD_HOWTO = (
+    "So geht’s: Such dir etwas aus, das noch frei ist, und sag uns kurz "
+    "Bescheid. Wir markieren es dann als vergeben, damit nichts doppelt kommt. "
+    "Die Links sind Vorschläge, kauft gern, wo ihr wollt."
+)
 
 
 def _text(max_len: int) -> Any:
@@ -128,8 +149,35 @@ SETTINGS_SCHEMA = vol.Schema(
 )
 
 
+RESERVE_SCHEMA = vol.Schema(
+    {
+        vol.Required("id"): vol.All(str, vol.Match(r"^[A-Za-z0-9_-]{1,40}$")),
+        vol.Required("name"): vol.All(vol.Coerce(str), vol.Strip, vol.Length(min=1, max=100)),
+    },
+    extra=vol.REMOVE_EXTRA,
+)
+RELEASE_SCHEMA = vol.Schema(
+    {
+        vol.Required("id"): vol.All(str, vol.Match(r"^[A-Za-z0-9_-]{1,40}$")),
+        vol.Required("key"): vol.All(str, vol.Length(min=16, max=100)),
+    },
+    extra=vol.REMOVE_EXTRA,
+)
+
+
 def _new_id() -> str:
     return "w" + secrets.token_hex(5)
+
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _admin_view(item: dict[str, Any]) -> dict[str, Any]:
+    """Wunsch fürs Bearbeiten-Menü: ohne Schlüssel, mit Hinweis auf Selbst-Markierung."""
+    out = {k: v for k, v in item.items() if k not in SELF_FIELDS}
+    out["selfReserved"] = bool(item.get("reservedBy") and item.get("reservedKey"))
+    return out
 
 
 class WishStore:
@@ -149,6 +197,8 @@ class WishStore:
         if data:
             self.rev = int(data.get("rev", 0))
             self.settings = {**DEFAULT_SETTINGS, **data.get("settings", {})}
+            if self.settings.get("howto") == OLD_HOWTO:
+                self.settings["howto"] = DEFAULT_SETTINGS["howto"]
             self.items = list(data.get("items", []))
 
     async def async_save(self) -> None:
@@ -158,7 +208,14 @@ class WishStore:
         )
 
     def full(self) -> dict[str, Any]:
-        return {"rev": self.rev, "settings": self.settings, "items": self.items}
+        return {
+            "rev": self.rev,
+            "settings": self.settings,
+            "items": [_admin_view(i) for i in self.items],
+        }
+
+    def find(self, item_id: str) -> dict[str, Any] | None:
+        return next((i for i in self.items if i["id"] == item_id), None)
 
     def public(self) -> dict[str, Any]:
         items = []
@@ -172,6 +229,11 @@ class WishStore:
         item_id = item.get("id")
         for idx, cur in enumerate(self.items):
             if cur["id"] == item_id:
+                # Selbst-Markierung bleibt erhalten, solange der Name gleich bleibt.
+                if item.get("reservedBy") and item["reservedBy"] == cur.get("reservedBy"):
+                    for key in SELF_FIELDS:
+                        if key in cur:
+                            item[key] = cur[key]
                 self.items[idx] = item
                 return item
         if len(self.items) >= MAX_ITEMS:
@@ -220,7 +282,7 @@ async def ws_item_save(hass: HomeAssistant, connection: websocket_api.ActiveConn
             connection.send_error(msg["id"], "invalid", str(err))
             return
         await _changed(hass, store)
-        connection.send_result(msg["id"], {"item": item, "rev": store.rev})
+        connection.send_result(msg["id"], {"item": _admin_view(item), "rev": store.rev})
 
 
 @websocket_api.websocket_command(
@@ -357,6 +419,97 @@ class PublicDataView(HomeAssistantView):
         return web.json_response(store.public(), headers=NO_STORE)
 
 
+class RateLimiter:
+    """Einfache Bremse gegen Massen-Anfragen auf die Seite ohne Login."""
+
+    def __init__(self, limit: int = RATE_LIMIT, window: float = RATE_WINDOW) -> None:
+        self.limit = limit
+        self.window = window
+        self._hits: dict[str, deque[float]] = {}
+
+    def allow(self, who: str) -> bool:
+        now = time.monotonic()
+        if len(self._hits) > 1000:
+            self._hits = {k: v for k, v in self._hits.items() if v and now - v[-1] < self.window}
+        hits = self._hits.setdefault(who, deque())
+        while hits and now - hits[0] > self.window:
+            hits.popleft()
+        if len(hits) >= self.limit:
+            return False
+        hits.append(now)
+        return True
+
+
+async def _public_json(request: web.Request, schema: vol.Schema) -> tuple[WishStore | None, dict[str, Any] | web.Response]:
+    hass = request.app["hass"]
+    store: WishStore | None = hass.data.get(DOMAIN)
+    if store is None:
+        return None, web.json_response({"error": "Die Liste ist gerade nicht erreichbar."}, status=503, headers=NO_STORE)
+    limiter: RateLimiter = hass.data.setdefault(f"{DOMAIN}_limiter", RateLimiter())
+    if not limiter.allow(request.remote or "?"):
+        return None, web.json_response({"error": "Zu viele Versuche. Bitte in ein paar Minuten noch einmal."}, status=429, headers=NO_STORE)
+    try:
+        data = schema(await request.json())
+    except (vol.Invalid, ValueError, TypeError):
+        return None, web.json_response({"error": "Ungültige Angaben."}, status=400, headers=NO_STORE)
+    return store, data
+
+
+class PublicReserveView(HomeAssistantView):
+    """Freien Wunsch ohne Login mit eigenem Namen als vergeben markieren."""
+
+    url = PUBLIC_RESERVE_URL
+    name = "wunschliste:vergeben"
+    requires_auth = False
+
+    async def post(self, request: web.Request) -> web.Response:
+        store, data = await _public_json(request, RESERVE_SCHEMA)
+        if store is None:
+            return data  # type: ignore[return-value]
+        hass = request.app["hass"]
+        async with store.lock:
+            item = store.find(data["id"])
+            if item is None:
+                return web.json_response({"error": "Diesen Wunsch gibt es nicht mehr."}, status=404, headers=NO_STORE)
+            if not (item.get("price") or 0) > 0:
+                return web.json_response({"error": "Ideen für Zeit statt Geld dürfen mehrere übernehmen, sie müssen nicht markiert werden."}, status=400, headers=NO_STORE)
+            if item.get("reservedBy"):
+                return web.json_response({"error": "Das hat gerade schon jemand anderes übernommen."}, status=409, headers=NO_STORE)
+            key = secrets.token_urlsafe(24)
+            item["reservedBy"] = data["name"]
+            item["reservedKey"] = _hash_key(key)
+            item["reservedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            await _changed(hass, store)
+        hass.bus.async_fire(EVENT_RESERVED, {"id": item["id"], "wunsch": item["name"], "von": data["name"]})
+        return web.json_response({"id": item["id"], "key": key}, headers=NO_STORE)
+
+
+class PublicReleaseView(HomeAssistantView):
+    """Eigene Markierung wieder aufheben (nur mit dem Schlüssel aus dem Browser)."""
+
+    url = PUBLIC_RELEASE_URL
+    name = "wunschliste:freigeben"
+    requires_auth = False
+
+    async def post(self, request: web.Request) -> web.Response:
+        store, data = await _public_json(request, RELEASE_SCHEMA)
+        if store is None:
+            return data  # type: ignore[return-value]
+        hass = request.app["hass"]
+        async with store.lock:
+            item = store.find(data["id"])
+            stored = (item or {}).get("reservedKey") or ""
+            if item is None or not item.get("reservedBy") or not stored or not hmac.compare_digest(stored, _hash_key(data["key"])):
+                return web.json_response({"error": "Das kannst nur du freigeben, wenn du es auf diesem Gerät markiert hast. Sag uns sonst kurz Bescheid."}, status=403, headers=NO_STORE)
+            who = item["reservedBy"]
+            item["reservedBy"] = ""
+            for key in SELF_FIELDS:
+                item.pop(key, None)
+            await _changed(hass, store)
+        hass.bus.async_fire(EVENT_RELEASED, {"id": item["id"], "wunsch": item["name"], "von": who})
+        return web.json_response({"id": item["id"]}, headers=NO_STORE)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     store = WishStore(hass)
     await store.async_load()
@@ -369,6 +522,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
         hass.http.register_view(PublicPageView(html))
         hass.http.register_view(PublicDataView())
+        hass.http.register_view(PublicReserveView())
+        hass.http.register_view(PublicReleaseView())
         for cmd in (ws_get, ws_item_save, ws_item_delete, ws_settings, ws_import, ws_subscribe):
             websocket_api.async_register_command(hass, cmd)
         hass.data[REGISTERED] = True

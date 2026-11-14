@@ -114,3 +114,87 @@ async def test_config_flow_single(hass: HomeAssistant) -> None:
     assert r["type"] == "create_entry"
     r = await hass.config_entries.flow.async_init(DOMAIN, context={"source": "user"})
     assert r["type"] == "abort"
+
+
+async def test_self_reserve_public(hass: HomeAssistant, hass_ws_client, hass_client_no_auth) -> None:
+    await _setup(hass)
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": "wunschliste/item_save", "item": {"name": "Spieluhr", "price": 30, "theme": "Spielen"}})
+    item = (await ws.receive_json())["result"]["item"]
+    await ws.send_json({"id": 2, "type": "wunschliste/item_save", "item": {"name": "Essen kochen", "price": 0}})
+    zeit = (await ws.receive_json())["result"]["item"]
+
+    events = []
+    hass.bus.async_listen("wunschliste_vergeben", events.append)
+    hass.bus.async_listen("wunschliste_freigegeben", events.append)
+    client = await hass_client_no_auth()
+
+    # Ohne Namen, unbekannter Wunsch, Zeit-Idee: abgelehnt
+    r = await client.post("/api/wunschliste/vergeben", json={"id": item["id"], "name": "  "})
+    assert r.status == 400
+    r = await client.post("/api/wunschliste/vergeben", json={"id": "gibtsnicht", "name": "Anna"})
+    assert r.status == 404
+    r = await client.post("/api/wunschliste/vergeben", json={"id": zeit["id"], "name": "Anna"})
+    assert r.status == 400
+
+    r = await client.post("/api/wunschliste/vergeben", json={"id": item["id"], "name": " Tante Anna "})
+    assert r.status == 200
+    key = (await r.json())["key"]
+    await hass.async_block_till_done()
+    assert events[-1].data == {"id": item["id"], "wunsch": "Spieluhr", "von": "Tante Anna"}
+
+    # Öffentlich vergeben, aber ohne Namen und ohne Schlüssel
+    r = await client.get("/api/wunschliste/liste")
+    text = await r.text()
+    assert "Tante Anna" not in text and key not in text
+    pub = await r.json()
+    assert next(i for i in pub["items"] if i["id"] == item["id"])["taken"] is True
+
+    # Zweites Markieren geht nicht
+    r = await client.post("/api/wunschliste/vergeben", json={"id": item["id"], "name": "Onkel Bob"})
+    assert r.status == 409
+
+    # Im Bearbeiten-Menü: Name sichtbar, Schlüssel nicht
+    await ws.send_json({"id": 3, "type": "wunschliste/get"})
+    got = next(i for i in (await ws.receive_json())["result"]["items"] if i["id"] == item["id"])
+    assert got["reservedBy"] == "Tante Anna"
+    assert got["selfReserved"] is True
+    assert "reservedKey" not in got
+
+    # Bearbeiten im Menü behält die Selbst-Markierung
+    await ws.send_json({"id": 4, "type": "wunschliste/item_save", "item": {**got, "note": "blau"}})
+    assert (await ws.receive_json())["result"]["item"]["selfReserved"] is True
+
+    # Freigeben nur mit richtigem Schlüssel
+    r = await client.post("/api/wunschliste/freigeben", json={"id": item["id"], "key": "x" * 32})
+    assert r.status == 403
+    r = await client.post("/api/wunschliste/freigeben", json={"id": item["id"], "key": key})
+    assert r.status == 200
+    await hass.async_block_till_done()
+    assert events[-1].event_type == "wunschliste_freigegeben"
+    await ws.send_json({"id": 5, "type": "wunschliste/get"})
+    got = next(i for i in (await ws.receive_json())["result"]["items"] if i["id"] == item["id"])
+    assert got["reservedBy"] == "" and got["selfReserved"] is False
+
+    # Vom Menü vergeben -> öffentlich nicht freigebbar
+    await ws.send_json({"id": 6, "type": "wunschliste/item_save", "item": {**got, "reservedBy": "Oma"}})
+    assert (await ws.receive_json())["success"]
+    r = await client.post("/api/wunschliste/freigeben", json={"id": item["id"], "key": key})
+    assert r.status == 403
+
+
+async def test_public_rate_limit(hass: HomeAssistant, hass_client_no_auth) -> None:
+    await _setup(hass)
+    client = await hass_client_no_auth()
+    codes = [(await client.post("/api/wunschliste/vergeben", json={"id": "x", "name": "a"})).status for _ in range(22)]
+    assert codes[:20] == [404] * 20
+    assert codes[-1] == 429
+
+
+async def test_old_howto_is_updated(hass: HomeAssistant, hass_storage) -> None:
+    from custom_components.wunschliste import DEFAULT_SETTINGS, OLD_HOWTO
+    hass_storage["wunschliste"] = {"version": 1, "key": "wunschliste", "data": {
+        "rev": 3, "settings": {"howto": OLD_HOWTO, "title": "Liste"}, "items": []}}
+    await _setup(hass)
+    assert hass.data["wunschliste"].settings["howto"] == DEFAULT_SETTINGS["howto"]
+    assert hass.data["wunschliste"].settings["title"] == "Liste"
