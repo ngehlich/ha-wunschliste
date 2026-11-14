@@ -32,7 +32,7 @@ Ohne Login erreichbar sind nur:
 
 - `/geschenkliste`: die Seite
 - `/api/wunschliste/liste`: Überschrift, Texte, Termin und die Wünsche (Name, Hinweis, Preis, Thema, Shop, Link, vergeben ja/nein)
-- `/api/wunschliste/vergeben`: einen freien Wunsch mit Namen markieren (nicht bei „Zeit statt Geld“)
+- `/api/wunschliste/vergeben`: einen freien Wunsch mit Namen markieren. Bei „Zeit statt Geld“ können mehrere zusagen, die Idee bleibt frei
 - `/api/wunschliste/freigeben`: eine eigene Markierung aufheben, nur mit dem Schlüssel, den der Browser beim Markieren bekommen hat
 
 Beide Aktionen sind auf 20 pro Adresse in 10 Minuten begrenzt.

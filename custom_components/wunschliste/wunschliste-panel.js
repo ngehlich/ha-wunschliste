@@ -134,6 +134,9 @@ class WunschlistePanel extends HTMLElement {
       taken ? el("span", {"class":"pill", title:it.selfReserved ? "Über die öffentliche Seite selbst eingetragen" : null}, ["Vergeben: " + it.reservedBy + (it.selfReserved ? " (selbst)" : "")]) : null,
       url && !taken ? el("div", {"class":"links"}, [el("a", {"class":"shop", href:url, target:"_blank", rel:"noopener noreferrer"}, ["Bei " + (it.shop || "Shop") + " ansehen"])]) : null
     ]);
+    const helpers = (it.helpers || []).length ? el("div", {"class":"edit"}, [el("span", null, ["Übernimmt:"])].concat(it.helpers.map((name, idx) =>
+      el("span", {"class":"pill"}, [name + " ", el("button", {"class":"btn", style:"padding:0 6px;border:0;background:none", title:"Zusage entfernen", "aria-label":"Zusage von " + name + " entfernen", disabled:ui.busy,
+        onclick:() => this._ws({type:"wunschliste/helper_remove", item_id:it.id, index:idx}, "Zusage entfernt.")}, ["×"])])))) : null;
     const bar = el("div", {"class":"edit"});
     if (ui.reserving === it.id) {
       const who = el("input", {id:"f-who-" + it.id, maxlength:"100", placeholder:"Wer schenkt das?", "aria-label":"Wer schenkt das?"});
@@ -160,7 +163,7 @@ class WunschlistePanel extends HTMLElement {
         el("span", {"class":"name"}, [it.name]),
         it.note ? el("span", {"class":"note"}, [it.note]) : null
       ]),
-      side, bar
+      side, helpers, bar
     ]);
   }
 
