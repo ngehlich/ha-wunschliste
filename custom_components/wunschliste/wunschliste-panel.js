@@ -131,7 +131,7 @@ class WunschlistePanel extends HTMLElement {
     const url = safeUrl(it.url);
     const side = el("div", {"class":"side"}, [
       el("span", {"class":"price"}, [euro(it.price)]),
-      taken ? el("span", {"class":"pill"}, ["Vergeben: " + it.reservedBy]) : null,
+      taken ? el("span", {"class":"pill", title:it.selfReserved ? "Über die öffentliche Seite selbst eingetragen" : null}, ["Vergeben: " + it.reservedBy + (it.selfReserved ? " (selbst)" : "")]) : null,
       url && !taken ? el("div", {"class":"links"}, [el("a", {"class":"shop", href:url, target:"_blank", rel:"noopener noreferrer"}, ["Bei " + (it.shop || "Shop") + " ansehen"])]) : null
     ]);
     const bar = el("div", {"class":"edit"});

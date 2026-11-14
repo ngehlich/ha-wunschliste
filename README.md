@@ -9,7 +9,8 @@ Die Daten liegen ausschließlich in Home Assistant (`/config/.storage/wunschlist
 ## Funktionen
 
 - **Bearbeiten in HA:** Wünsche hinzufügen, ändern, löschen, als vergeben markieren (mit Namen) und wieder freigeben
-- **Öffentliche Seite** unter `https://<deine-ha-adresse>/geschenkliste`, nur zum Ansehen. Sie zeigt „Schon vergeben“, aber nie, wer etwas schenkt
+- **Öffentliche Seite** unter `https://<deine-ha-adresse>/geschenkliste`. Dort kann man einen freien Wunsch mit „Ich schenke das“ und seinem Namen selbst als vergeben markieren und auf demselben Gerät mit „Doch nicht“ wieder freigeben. Die Seite zeigt nur „Schon vergeben“, nie, wer etwas schenkt
+- **Events für Automationen:** `wunschliste_vergeben` und `wunschliste_freigegeben` mit `wunsch` und `von`, z. B. für eine Push-Nachricht
 - Preisklassen (unter 20 €, 20–50 €, 50–100 €, über 100 €) und „Zeit statt Geld“ für Wünsche mit Preis 0
 - Überschrift, Termin, Kleidergrößen und Hinweistexte unter „Texte und Termin“
 - Import und Export der Liste als JSON-Datei
@@ -31,8 +32,12 @@ Ohne Login erreichbar sind nur:
 
 - `/geschenkliste`: die Seite
 - `/api/wunschliste/liste`: Überschrift, Texte, Termin und die Wünsche (Name, Hinweis, Preis, Thema, Shop, Link, vergeben ja/nein)
+- `/api/wunschliste/vergeben`: einen freien Wunsch mit Namen markieren (nicht bei „Zeit statt Geld“)
+- `/api/wunschliste/freigeben`: eine eigene Markierung aufheben, nur mit dem Schlüssel, den der Browser beim Markieren bekommen hat
 
-Wer etwas schenkt, steht nur im Bearbeiten-Menü. Ändern lässt sich die Liste nur mit HA-Login.
+Beide Aktionen sind auf 20 pro Adresse in 10 Minuten begrenzt.
+
+Wer etwas schenkt, steht nur im Bearbeiten-Menü (selbst eingetragene Namen mit „(selbst)“). Wünsche anlegen, ändern und fremde Markierungen aufheben geht nur mit HA-Login.
 
 ## Updates und neue Versionen
 

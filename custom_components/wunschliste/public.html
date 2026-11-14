@@ -77,6 +77,12 @@ input,select,textarea{font:inherit;font-size:14px;color:var(--ink);background:va
 .status{font-size:13px;color:var(--ok)}
 .status.err{color:var(--accent)}
 footer{color:var(--muted);font-size:13px;max-width:62ch}
+.claim{grid-column:1 / -1;display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding-top:8px}
+.claim input{flex:1 1 180px}
+.claim .hint{flex-basis:100%;font-size:13px;color:var(--muted);margin:0}
+.claim .err{flex-basis:100%;font-size:13px;color:var(--accent);margin:0}
+.pill.mine{background:var(--accent-soft);color:var(--accent)}
+.toast{position:fixed;left:50%;bottom:max(16px,env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--bg);border-radius:10px;padding:10px 16px;font-size:14px;max-width:calc(100vw - 32px);box-shadow:0 4px 16px rgba(0,0,0,.2)}
 @media (max-width:520px){
   li.item{grid-template-columns:1fr}
   .side{align-items:flex-start;text-align:left;flex-direction:row;flex-wrap:wrap;gap:8px 12px}
@@ -101,7 +107,10 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
     {key:"o100", label:"Über 100 €", min:100, max:1e9}
   ];
   var state = null;
-  var ui = {band:"all", hideTaken:false};
+  var ui = {band:"all", hideTaken:false, claiming:null, busy:false, err:"", toast:""};
+  var mine = {}, myName = "";
+  try { mine = JSON.parse(localStorage.getItem("wl-mine") || "{}") || {}; myName = localStorage.getItem("wl-name") || ""; } catch(e) {}
+  function persistMine(){ try { localStorage.setItem("wl-mine", JSON.stringify(mine)); localStorage.setItem("wl-name", myName); } catch(e) {} }
   try { var s = localStorage.getItem("wl-ui"); if (s) { var o = JSON.parse(s); ui.band = o.band || "all"; ui.hideTaken = !!o.hideTaken; } } catch(e) {}
   function persistUi(){ try { localStorage.setItem("wl-ui", JSON.stringify({band:ui.band, hideTaken:ui.hideTaken})); } catch(e) {} }
 
@@ -120,11 +129,50 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
   function etLabel(){ try { return new Date(cfg("etDate")+"T00:00:00").toLocaleDateString("de-DE",{day:"numeric",month:"long",year:"numeric"}); } catch(e){ return cfg("etDate"); } }
   function daysToEt(){ if (!cfg("etDate")) return 0; return Math.ceil((new Date(cfg("etDate")+"T00:00:00") - new Date())/86400000); }
 
+  function post(path, body){
+    return fetch(path, {method:"POST", cache:"no-store", credentials:"omit", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body)})
+      .then(function(r){ return r.json().catch(function(){ return {}; }).then(function(d){ if (!r.ok) throw new Error(d.error || "Das hat nicht geklappt. Bitte noch einmal versuchen."); return d; }); });
+  }
+  function showToast(t){ ui.toast = t; render(); setTimeout(function(){ if (ui.toast === t) { ui.toast = ""; render(); } }, 4000); }
+  function claim(it, name){
+    name = (name || "").trim();
+    if (!name) { ui.err = "Bitte gib deinen Namen ein, damit wir wissen, bei wem wir uns bedanken dürfen."; render(); return; }
+    ui.busy = true; ui.err = ""; render();
+    post("/api/wunschliste/vergeben", {id:it.id, name:name}).then(function(d){
+      mine[it.id] = d.key; myName = name; persistMine();
+      it.taken = true; ui.claiming = null; ui.busy = false;
+      showToast("Danke! „" + it.name + "“ ist jetzt für dich reserviert.");
+      load();
+    }).catch(function(e){ ui.busy = false; ui.err = e.message; render(); load(); });
+  }
+  function release(it){
+    ui.busy = true; render();
+    post("/api/wunschliste/freigeben", {id:it.id, key:mine[it.id]}).then(function(){
+      delete mine[it.id]; persistMine(); it.taken = false; ui.busy = false;
+      showToast("„" + it.name + "“ ist wieder frei.");
+      load();
+    }).catch(function(e){ ui.busy = false; showToast(e.message); });
+  }
+
+  function claimBox(it){
+    var input = el("input", {type:"text", maxlength:"100", autocomplete:"name", placeholder:"Dein Name", "aria-label":"Dein Name", value:ui.draft,
+      oninput:function(){ ui.draft = input.value; },
+      onkeydown:function(ev){ if (ev.key === "Enter") claim(it, input.value); if (ev.key === "Escape") { ui.claiming = null; ui.err = ""; render(); } }});
+    if (ui.focusClaim) { ui.focusClaim = false; setTimeout(function(){ try { input.focus(); } catch(e) {} }, 0); }
+    return el("div", {"class":"claim"}, [
+      input,
+      el("button", {"class":"btn primary", disabled:ui.busy, onclick:function(){ claim(it, input.value); }}, [ui.busy ? "Einen Moment …" : "Eintragen"]),
+      el("button", {"class":"btn", disabled:ui.busy, onclick:function(){ ui.claiming = null; ui.err = ""; render(); }}, ["Abbrechen"]),
+      ui.err ? el("p", {"class":"err", role:"alert"}, [ui.err]) : null,
+      el("p", {"class":"hint"}, ["Andere sehen nur „Schon vergeben“. Deinen Namen sehen nur wir."])
+    ]);
+  }
+
   function itemRow(it){
-    var taken = !!it.taken, url = safeUrl(it.url), links = [];
+    var taken = !!it.taken, url = safeUrl(it.url), links = [], isMine = taken && !!mine[it.id], canClaim = !taken && it.price > 0;
     if (url) links.push(el("a", {"class":"shop", href:url, target:"_blank", rel:"noopener noreferrer"}, ["Bei " + (it.shop || "Shop") + " ansehen"]));
     if (it.price > 0 && !/amazon\./i.test(url||"")) links.push(el("a", {"class":"alt", href:amazonSearch(it.name), target:"_blank", rel:"noopener noreferrer"}, [url ? "oder bei Amazon suchen" : "Bei Amazon suchen"]));
-    return el("li", {"class":"item" + (taken ? " taken" : "")}, [
+    return el("li", {"class":"item" + (taken && !isMine ? " taken" : "")}, [
       el("div", {"class":"main"}, [
         el("span", {"class":"theme", style:"color:var(--muted)"}, [it.theme || ""]),
         el("span", {"class":"name"}, [it.name]),
@@ -132,9 +180,12 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
       ]),
       el("div", {"class":"side"}, [
         el("span", {"class":"price"}, [euro(it.price)]),
-        taken ? el("span", {"class":"pill"}, ["Schon vergeben"]) : null,
-        links.length && !taken ? el("div", {"class":"links"}, links) : null
-      ])
+        taken ? el("span", {"class":"pill" + (isMine ? " mine" : "")}, [isMine ? "Von dir reserviert" : "Schon vergeben"]) : null,
+        links.length && (!taken || isMine) ? el("div", {"class":"links"}, links) : null,
+        canClaim && ui.claiming !== it.id ? el("button", {"class":"btn primary", onclick:function(){ ui.claiming = it.id; ui.err = ""; ui.draft = myName; ui.focusClaim = true; render(); }}, ["Ich schenke das"]) : null,
+        isMine ? el("button", {"class":"btn", disabled:ui.busy, onclick:function(){ release(it); }}, ["Doch nicht"]) : null
+      ]),
+      ui.claiming === it.id && canClaim ? claimBox(it) : null
     ]);
   }
 
@@ -180,13 +231,20 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
         ul
       ]));
     });
+    if (ui.toast) app.appendChild(el("div", {"class":"toast", role:"status"}, [ui.toast]));
     app.appendChild(el("footer", null, ["Preise sind ungefähre Richtwerte und können sich im Shop ändern. Bei Größen und Farben lieber kurz fragen."]));
   }
 
   function load(){
     fetch("/api/wunschliste/liste", {cache:"no-store", credentials:"omit"})
       .then(function(r){ if (!r.ok) throw new Error(r.status); return r.json(); })
-      .then(function(d){ if (!d || !Array.isArray(d.items)) throw new Error("format"); state = d; ui.loadErr = false; render(); })
+      .then(function(d){ if (!d || !Array.isArray(d.items)) throw new Error("format"); state = d; ui.loadErr = false;
+        // Fremd freigegebene Wünsche aus der eigenen Liste entfernen
+        var changed = false;
+        Object.keys(mine).forEach(function(id){ var it = d.items.filter(function(i){ return i.id === id; })[0]; if (!it || !it.taken) { delete mine[id]; changed = true; } });
+        if (changed) persistMine();
+        if (ui.claiming && !ui.busy) { var c = d.items.filter(function(i){ return i.id === ui.claiming; })[0]; if (!c || c.taken) ui.claiming = null; }
+        render(); })
       .catch(function(){ if (!state) { ui.loadErr = true; render(); } });
   }
   render();
