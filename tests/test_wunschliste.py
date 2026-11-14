@@ -134,14 +134,12 @@ async def test_self_reserve_public(hass: HomeAssistant, hass_ws_client, hass_cli
     assert r.status == 400
     r = await client.post("/api/wunschliste/vergeben", json={"id": "gibtsnicht", "name": "Anna"})
     assert r.status == 404
-    r = await client.post("/api/wunschliste/vergeben", json={"id": zeit["id"], "name": "Anna"})
-    assert r.status == 400
 
     r = await client.post("/api/wunschliste/vergeben", json={"id": item["id"], "name": " Tante Anna "})
     assert r.status == 200
     key = (await r.json())["key"]
     await hass.async_block_till_done()
-    assert events[-1].data == {"id": item["id"], "wunsch": "Spieluhr", "von": "Tante Anna"}
+    assert events[-1].data == {"id": item["id"], "wunsch": "Spieluhr", "von": "Tante Anna", "zeit": False}
 
     # Öffentlich vergeben, aber ohne Namen und ohne Schlüssel
     r = await client.get("/api/wunschliste/liste")
@@ -198,3 +196,54 @@ async def test_old_howto_is_updated(hass: HomeAssistant, hass_storage) -> None:
     await _setup(hass)
     assert hass.data["wunschliste"].settings["howto"] == DEFAULT_SETTINGS["howto"]
     assert hass.data["wunschliste"].settings["title"] == "Liste"
+
+
+async def test_zeit_mehrfach(hass: HomeAssistant, hass_ws_client, hass_client_no_auth) -> None:
+    """Zeit statt Geld: mehrere sagen zu, die Idee bleibt öffentlich frei."""
+    await _setup(hass)
+    ws = await hass_ws_client(hass)
+    await ws.send_json({"id": 1, "type": "wunschliste/item_save", "item": {"name": "Essen kochen", "price": 0}})
+    zeit = (await ws.receive_json())["result"]["item"]
+    events = []
+    hass.bus.async_listen("wunschliste_vergeben", events.append)
+    hass.bus.async_listen("wunschliste_freigegeben", events.append)
+    client = await hass_client_no_auth()
+
+    keys = []
+    for name in ("Anna", "Bob"):
+        r = await client.post("/api/wunschliste/vergeben", json={"id": zeit["id"], "name": name})
+        assert r.status == 200
+        keys.append((await r.json())["key"])
+    await hass.async_block_till_done()
+    assert [e.data["von"] for e in events] == ["Anna", "Bob"]
+    assert events[0].data["zeit"] is True
+
+    r = await client.get("/api/wunschliste/liste")
+    text = await r.text()
+    assert "Anna" not in text and "helpers" not in text and keys[0] not in text
+    assert (await r.json())["items"][0]["taken"] is False
+
+    await ws.send_json({"id": 2, "type": "wunschliste/get"})
+    got = (await ws.receive_json())["result"]["items"][0]
+    assert got["helpers"] == ["Anna", "Bob"]
+    assert got["reservedBy"] == ""
+
+    # Bearbeiten behält die Zusagen
+    await ws.send_json({"id": 3, "type": "wunschliste/item_save", "item": {**got, "note": "gern abends"}})
+    assert (await ws.receive_json())["result"]["item"]["helpers"] == ["Anna", "Bob"]
+
+    # Eigene Zusage zurückziehen
+    r = await client.post("/api/wunschliste/freigeben", json={"id": zeit["id"], "key": keys[0]})
+    assert r.status == 200
+    r = await client.post("/api/wunschliste/freigeben", json={"id": zeit["id"], "key": keys[0]})
+    assert r.status == 403
+    await hass.async_block_till_done()
+    assert events[-1].event_type == "wunschliste_freigegeben" and events[-1].data["von"] == "Anna"
+
+    # Aus dem Menü entfernen
+    await ws.send_json({"id": 4, "type": "wunschliste/helper_remove", "item_id": zeit["id"], "index": 0})
+    assert (await ws.receive_json())["success"]
+    await ws.send_json({"id": 5, "type": "wunschliste/helper_remove", "item_id": zeit["id"], "index": 0})
+    assert not (await ws.receive_json())["success"]
+    await ws.send_json({"id": 6, "type": "wunschliste/get"})
+    assert (await ws.receive_json())["result"]["items"][0]["helpers"] == []

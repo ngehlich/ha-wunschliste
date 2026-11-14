@@ -140,8 +140,10 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
     ui.busy = true; ui.err = ""; render();
     post("/api/wunschliste/vergeben", {id:it.id, name:name}).then(function(d){
       mine[it.id] = d.key; myName = name; persistMine();
-      it.taken = true; ui.claiming = null; ui.busy = false;
-      showToast("Danke! „" + it.name + "“ ist jetzt für dich reserviert.");
+      var zeit = !(it.price > 0);
+      if (!zeit) it.taken = true;
+      ui.claiming = null; ui.busy = false;
+      showToast(zeit ? "Danke! Wir melden uns bei dir wegen „" + it.name + "“." : "Danke! „" + it.name + "“ ist jetzt für dich reserviert.");
       load();
     }).catch(function(e){ ui.busy = false; ui.err = e.message; render(); load(); });
   }
@@ -149,7 +151,7 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
     ui.busy = true; render();
     post("/api/wunschliste/freigeben", {id:it.id, key:mine[it.id]}).then(function(){
       delete mine[it.id]; persistMine(); it.taken = false; ui.busy = false;
-      showToast("„" + it.name + "“ ist wieder frei.");
+      showToast(it.price > 0 ? "„" + it.name + "“ ist wieder frei." : "Alles klar, du bist bei „" + it.name + "“ wieder ausgetragen.");
       load();
     }).catch(function(e){ ui.busy = false; showToast(e.message); });
   }
@@ -164,12 +166,12 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
       el("button", {"class":"btn primary", disabled:ui.busy, onclick:function(){ claim(it, input.value); }}, [ui.busy ? "Einen Moment …" : "Eintragen"]),
       el("button", {"class":"btn", disabled:ui.busy, onclick:function(){ ui.claiming = null; ui.err = ""; render(); }}, ["Abbrechen"]),
       ui.err ? el("p", {"class":"err", role:"alert"}, [ui.err]) : null,
-      el("p", {"class":"hint"}, ["Andere sehen nur „Schon vergeben“. Deinen Namen sehen nur wir."])
+      el("p", {"class":"hint"}, [it.price > 0 ? "Andere sehen nur „Schon vergeben“. Deinen Namen sehen nur wir." : "Deinen Namen sehen nur wir. Andere können das auch noch übernehmen."])
     ]);
   }
 
   function itemRow(it){
-    var taken = !!it.taken, url = safeUrl(it.url), links = [], isMine = taken && !!mine[it.id], canClaim = !taken && it.price > 0;
+    var taken = !!it.taken, url = safeUrl(it.url), links = [], zeit = !(it.price > 0), isMine = !!mine[it.id] && (taken || zeit), canClaim = !taken && !isMine;
     if (url) links.push(el("a", {"class":"shop", href:url, target:"_blank", rel:"noopener noreferrer"}, ["Bei " + (it.shop || "Shop") + " ansehen"]));
     if (it.price > 0 && !/amazon\./i.test(url||"")) links.push(el("a", {"class":"alt", href:amazonSearch(it.name), target:"_blank", rel:"noopener noreferrer"}, [url ? "oder bei Amazon suchen" : "Bei Amazon suchen"]));
     return el("li", {"class":"item" + (taken && !isMine ? " taken" : "")}, [
@@ -180,9 +182,9 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
       ]),
       el("div", {"class":"side"}, [
         el("span", {"class":"price"}, [euro(it.price)]),
-        taken ? el("span", {"class":"pill" + (isMine ? " mine" : "")}, [isMine ? "Von dir reserviert" : "Schon vergeben"]) : null,
+        taken ? el("span", {"class":"pill" + (isMine ? " mine" : "")}, [isMine ? "Von dir reserviert" : "Schon vergeben"]) : (isMine ? el("span", {"class":"pill mine"}, ["Du bist dabei"]) : null),
         links.length && (!taken || isMine) ? el("div", {"class":"links"}, links) : null,
-        canClaim && ui.claiming !== it.id ? el("button", {"class":"btn primary", onclick:function(){ ui.claiming = it.id; ui.err = ""; ui.draft = myName; ui.focusClaim = true; render(); }}, ["Ich schenke das"]) : null,
+        canClaim && ui.claiming !== it.id ? el("button", {"class":"btn primary", onclick:function(){ ui.claiming = it.id; ui.err = ""; ui.draft = myName; ui.focusClaim = true; render(); }}, [zeit ? "Das übernehme ich" : "Ich schenke das"]) : null,
         isMine ? el("button", {"class":"btn", disabled:ui.busy, onclick:function(){ release(it); }}, ["Doch nicht"]) : null
       ]),
       ui.claiming === it.id && canClaim ? claimBox(it) : null
@@ -241,7 +243,7 @@ footer{color:var(--muted);font-size:13px;max-width:62ch}
       .then(function(d){ if (!d || !Array.isArray(d.items)) throw new Error("format"); state = d; ui.loadErr = false;
         // Fremd freigegebene Wünsche aus der eigenen Liste entfernen
         var changed = false;
-        Object.keys(mine).forEach(function(id){ var it = d.items.filter(function(i){ return i.id === id; })[0]; if (!it || !it.taken) { delete mine[id]; changed = true; } });
+        Object.keys(mine).forEach(function(id){ var it = d.items.filter(function(i){ return i.id === id; })[0]; if (!it || (!it.taken && it.price > 0)) { delete mine[id]; changed = true; } });
         if (changed) persistMine();
         if (ui.claiming && !ui.busy) { var c = d.items.filter(function(i){ return i.id === ui.claiming; })[0]; if (!c || c.taken) ui.claiming = null; }
         render(); })

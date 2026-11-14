@@ -1,5 +1,11 @@
 # Änderungen
 
+## 1.2.0
+
+- Auch Ideen bei „Zeit statt Geld“ haben jetzt einen Button („Das übernehme ich“). Mehrere können zusagen, die Idee bleibt für alle frei und wird nicht als vergeben angezeigt.
+- Im Bearbeiten-Menü steht bei diesen Ideen, wer zugesagt hat. Einzelne Zusagen lassen sich dort entfernen.
+- Die Events `wunschliste_vergeben` und `wunschliste_freigegeben` enthalten zusätzlich `zeit` (true/false).
+
 ## 1.1.0
 
 - Gäste können auf der öffentlichen Seite einen freien Wunsch mit „Ich schenke das“ und ihrem Namen selbst als vergeben markieren. Andere sehen nur „Schon vergeben“.

@@ -6,7 +6,8 @@ der durch den Home-Assistant-Login geschützt ist.
 
 Für Familie und Freunde gibt es eine Seite ohne Login unter /geschenkliste.
 Sie bekommt nur die öffentlichen Felder: wer etwas schenkt, sieht dort niemand,
-nur dass es vergeben ist. Dort kann man einen freien Wunsch selbst mit seinem
+nur dass es vergeben ist. Ideen für „Zeit statt Geld“ (Preis 0) dürfen mehrere
+übernehmen, sie bleiben für alle frei. Dort kann man einen freien Wunsch selbst mit seinem
 Namen als vergeben markieren. Wieder freigeben kann ihn nur, wer ihn markiert hat
 (Schlüssel im Browser) oder jemand mit HA-Login.
 """
@@ -40,7 +41,7 @@ from homeassistant.helpers.storage import Store
 _LOGGER = logging.getLogger(__name__)
 
 DOMAIN = "wunschliste"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 STORAGE_VERSION = 1
 PANEL_URL = "wunschliste"
 STATIC_URL = "/wunschliste_static/wunschliste-panel.js"
@@ -57,6 +58,7 @@ RATE_WINDOW = 600  # ... in 10 Minuten
 SIGNAL = f"{DOMAIN}_changed"
 REGISTERED = f"{DOMAIN}_registered"
 MAX_ITEMS = 500
+MAX_HELPERS = 30  # Zusagen pro „Zeit statt Geld“-Idee
 
 THEMES = [
     "Pflege", "Schlafen", "Essen", "Baden", "Spielen", "Kleidung",
@@ -65,6 +67,8 @@ THEMES = [
 PUBLIC_FIELDS = ("id", "name", "note", "price", "theme", "shop", "url")
 # Interne Felder einer Selbst-Markierung über die öffentliche Seite.
 SELF_FIELDS = ("reservedKey", "reservedAt")
+# „Zeit statt Geld“: mehrere dürfen zusagen, die Idee bleibt für alle frei.
+HELPERS = "helpers"
 
 DEFAULT_SETTINGS: dict[str, Any] = {
     "title": "Unsere Wunschliste",
@@ -175,7 +179,8 @@ def _hash_key(key: str) -> str:
 
 def _admin_view(item: dict[str, Any]) -> dict[str, Any]:
     """Wunsch fürs Bearbeiten-Menü: ohne Schlüssel, mit Hinweis auf Selbst-Markierung."""
-    out = {k: v for k, v in item.items() if k not in SELF_FIELDS}
+    out = {k: v for k, v in item.items() if k not in SELF_FIELDS and k != HELPERS}
+    out[HELPERS] = [h.get("name", "") for h in item.get(HELPERS, [])]
     out["selfReserved"] = bool(item.get("reservedBy") and item.get("reservedKey"))
     return out
 
@@ -234,6 +239,8 @@ class WishStore:
                     for key in SELF_FIELDS:
                         if key in cur:
                             item[key] = cur[key]
+                if cur.get(HELPERS):
+                    item[HELPERS] = cur[HELPERS]
                 self.items[idx] = item
                 return item
         if len(self.items) >= MAX_ITEMS:
@@ -297,6 +304,31 @@ async def ws_item_delete(hass: HomeAssistant, connection: websocket_api.ActiveCo
         store.items = [i for i in store.items if i["id"] != msg["item_id"]]
         if len(store.items) != before:
             await _changed(hass, store)
+        connection.send_result(msg["id"], {"rev": store.rev})
+
+
+@websocket_api.websocket_command(
+    {
+        vol.Required("type"): "wunschliste/helper_remove",
+        vol.Required("item_id"): str,
+        vol.Required("index"): vol.All(int, vol.Range(min=0)),
+    }
+)
+@websocket_api.async_response
+async def ws_helper_remove(hass: HomeAssistant, connection: websocket_api.ActiveConnection, msg: dict[str, Any]) -> None:
+    """Eine Zusage bei „Zeit statt Geld“ aus dem Bearbeiten-Menü entfernen."""
+    if (store := _store(hass, connection, msg["id"])) is None:
+        return
+    async with store.lock:
+        item = store.find(msg["item_id"])
+        helpers = (item or {}).get(HELPERS, [])
+        if msg["index"] >= len(helpers):
+            connection.send_error(msg["id"], "invalid", "Diese Zusage gibt es nicht mehr")
+            return
+        helpers.pop(msg["index"])
+        if not helpers:
+            item.pop(HELPERS)
+        await _changed(hass, store)
         connection.send_result(msg["id"], {"rev": store.rev})
 
 
@@ -471,8 +503,20 @@ class PublicReserveView(HomeAssistantView):
             item = store.find(data["id"])
             if item is None:
                 return web.json_response({"error": "Diesen Wunsch gibt es nicht mehr."}, status=404, headers=NO_STORE)
-            if not (item.get("price") or 0) > 0:
-                return web.json_response({"error": "Ideen für Zeit statt Geld dürfen mehrere übernehmen, sie müssen nicht markiert werden."}, status=400, headers=NO_STORE)
+            zeit = not (item.get("price") or 0) > 0
+            if zeit and not item.get("reservedBy"):
+                helpers = item.setdefault(HELPERS, [])
+                if len(helpers) >= MAX_HELPERS:
+                    return web.json_response({"error": "Hier haben sich schon sehr viele eingetragen. Sag uns gern direkt Bescheid."}, status=409, headers=NO_STORE)
+                key = secrets.token_urlsafe(24)
+                helpers.append({
+                    "name": data["name"],
+                    "key": _hash_key(key),
+                    "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                })
+                await _changed(hass, store)
+                hass.bus.async_fire(EVENT_RESERVED, {"id": item["id"], "wunsch": item["name"], "von": data["name"], "zeit": True})
+                return web.json_response({"id": item["id"], "key": key}, headers=NO_STORE)
             if item.get("reservedBy"):
                 return web.json_response({"error": "Das hat gerade schon jemand anderes übernommen."}, status=409, headers=NO_STORE)
             key = secrets.token_urlsafe(24)
@@ -480,7 +524,7 @@ class PublicReserveView(HomeAssistantView):
             item["reservedKey"] = _hash_key(key)
             item["reservedAt"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
             await _changed(hass, store)
-        hass.bus.async_fire(EVENT_RESERVED, {"id": item["id"], "wunsch": item["name"], "von": data["name"]})
+        hass.bus.async_fire(EVENT_RESERVED, {"id": item["id"], "wunsch": item["name"], "von": data["name"], "zeit": False})
         return web.json_response({"id": item["id"], "key": key}, headers=NO_STORE)
 
 
@@ -498,15 +542,24 @@ class PublicReleaseView(HomeAssistantView):
         hass = request.app["hass"]
         async with store.lock:
             item = store.find(data["id"])
+            hashed = _hash_key(data["key"])
+            for helper in (item or {}).get(HELPERS, []):
+                if hmac.compare_digest(helper.get("key", ""), hashed):
+                    item[HELPERS].remove(helper)
+                    if not item[HELPERS]:
+                        item.pop(HELPERS)
+                    await _changed(hass, store)
+                    hass.bus.async_fire(EVENT_RELEASED, {"id": item["id"], "wunsch": item["name"], "von": helper.get("name", ""), "zeit": True})
+                    return web.json_response({"id": item["id"]}, headers=NO_STORE)
             stored = (item or {}).get("reservedKey") or ""
-            if item is None or not item.get("reservedBy") or not stored or not hmac.compare_digest(stored, _hash_key(data["key"])):
+            if item is None or not item.get("reservedBy") or not stored or not hmac.compare_digest(stored, hashed):
                 return web.json_response({"error": "Das kannst nur du freigeben, wenn du es auf diesem Gerät markiert hast. Sag uns sonst kurz Bescheid."}, status=403, headers=NO_STORE)
             who = item["reservedBy"]
             item["reservedBy"] = ""
             for key in SELF_FIELDS:
                 item.pop(key, None)
             await _changed(hass, store)
-        hass.bus.async_fire(EVENT_RELEASED, {"id": item["id"], "wunsch": item["name"], "von": who})
+        hass.bus.async_fire(EVENT_RELEASED, {"id": item["id"], "wunsch": item["name"], "von": who, "zeit": False})
         return web.json_response({"id": item["id"]}, headers=NO_STORE)
 
 
@@ -524,7 +577,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.http.register_view(PublicDataView())
         hass.http.register_view(PublicReserveView())
         hass.http.register_view(PublicReleaseView())
-        for cmd in (ws_get, ws_item_save, ws_item_delete, ws_settings, ws_import, ws_subscribe):
+        for cmd in (ws_get, ws_item_save, ws_item_delete, ws_helper_remove, ws_settings, ws_import, ws_subscribe):
             websocket_api.async_register_command(hass, cmd)
         hass.data[REGISTERED] = True
 
