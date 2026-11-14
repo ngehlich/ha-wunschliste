@@ -1,0 +1,14 @@
+{
+  "title": "Wunschliste",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Wunschliste",
+        "description": "Geschenkliste zur Geburt in Home Assistant pflegen. Danach erscheint „Wunschliste“ in der Seitenleiste."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "Die Wunschliste ist bereits eingerichtet."
+    }
+  }
+}

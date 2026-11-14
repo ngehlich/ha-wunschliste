@@ -1,0 +1,14 @@
+{
+  "domain": "wunschliste",
+  "name": "Wunschliste",
+  "codeowners": ["@ngehlich"],
+  "config_flow": true,
+  "dependencies": ["http", "frontend", "panel_custom", "websocket_api"],
+  "documentation": "https://github.com/ngehlich/ha-wunschliste",
+  "integration_type": "service",
+  "iot_class": "calculated",
+  "issue_tracker": "https://github.com/ngehlich/ha-wunschliste/issues",
+  "requirements": [],
+  "single_config_entry": true,
+  "version": "1.0.0"
+}

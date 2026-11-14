@@ -1,0 +1,14 @@
+{
+  "title": "Wish list",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Wish list",
+        "description": "Maintain a baby gift list in Home Assistant. A “Wunschliste” entry appears in the sidebar afterwards."
+      }
+    },
+    "abort": {
+      "single_instance_allowed": "The wish list is already set up."
+    }
+  }
+}
